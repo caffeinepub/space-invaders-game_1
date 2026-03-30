@@ -1,0 +1,56 @@
+@import url("https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --radius: 0.5rem;
+    /* Navy background */
+    --background: 0.14 0.04 240;
+    --foreground: 0.96 0.005 240;
+    --card: 0.18 0.05 240;
+    --card-foreground: 0.96 0.005 240;
+    --popover: 0.18 0.05 240;
+    --popover-foreground: 0.96 0.005 240;
+    /* Orange-gold primary */
+    --primary: 0.72 0.16 55;
+    --primary-foreground: 0.1 0.02 240;
+    --secondary: 0.22 0.055 240;
+    --secondary-foreground: 0.9 0.01 240;
+    --muted: 0.2 0.04 240;
+    --muted-foreground: 0.6 0.04 240;
+    --accent: 0.72 0.16 55;
+    --accent-foreground: 0.1 0.02 240;
+    --destructive: 0.58 0.24 25;
+    --destructive-foreground: 0.985 0 0;
+    --border: 0.28 0.06 240;
+    --input: 0.28 0.06 240;
+    --ring: 0.72 0.16 55;
+    --chart-1: 0.72 0.16 55;
+    --chart-2: 0.65 0.2 150;
+    --chart-3: 0.7 0.18 200;
+    --chart-4: 0.8 0.18 85;
+    --chart-5: 0.6 0.22 320;
+    --sidebar: 0.12 0.04 240;
+    --sidebar-foreground: 0.96 0.005 240;
+    --sidebar-primary: 0.72 0.16 55;
+    --sidebar-primary-foreground: 0.1 0.02 240;
+    --sidebar-accent: 0.22 0.055 240;
+    --sidebar-accent-foreground: 0.9 0.01 240;
+    --sidebar-border: 0.28 0.06 240;
+    --sidebar-ring: 0.72 0.16 55;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    background: linear-gradient(180deg, #0b1a2a 0%, #142b45 100%);
+    background-attachment: fixed;
+    overflow-x: hidden;
+  }
+}
