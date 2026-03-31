@@ -1,26 +1,27 @@
 import { useCallback, useEffect, useRef } from "react";
 
-// ─── Constants ─────────────────────────────────────────────────────────────
+// ─── Constants ──────────────────────────────────────────────────────────────
 const CW = 800;
 const CH = 700;
 const HUD_H = 55;
 const ALIEN_COLS = 11;
 const ALIEN_ROWS = 5;
-const ALIEN_W = 36;
-const ALIEN_H = 28;
+const ALIEN_W = 44;
+const ALIEN_H = 32;
 const ALIEN_SX = 60;
-const ALIEN_SY = 48;
-const ALIEN_START_X = 44;
-const ALIEN_START_Y = HUD_H + 45;
-const PLAYER_Y = CH - 60;
-const PLAYER_W = 40;
+const ALIEN_SY = 52;
+const ALIEN_START_X = 60;
+const ALIEN_START_Y = HUD_H + 55;
+const PLAYER_Y = CH - 58;
+const PLAYER_W = 48;
+const PLAYER_H = 28;
 const SHIELD_COUNT = 4;
+const SHIELD_COLS_N = 14;
+const SHIELD_ROWS_N = 9;
 const SHIELD_PX = 5;
-const SHIELD_COLS_N = 12;
-const SHIELD_ROWS_N = 8;
-const UFO_Y = HUD_H + 18;
-const BULLET_SPEED = 11;
-const ALIEN_BULLET_SPEED = 3.5;
+const UFO_Y = HUD_H + 20;
+const BULLET_SPEED = 13;
+const ALIEN_BULLET_SPEED_BASE = 3.2;
 const PLAYER_SPEED = 5;
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -30,7 +31,7 @@ interface Alien {
   x: number;
   y: number;
   alive: boolean;
-  type: 0 | 1 | 2; // 0=squid(top), 1=octopus(mid), 2=crab(bot)
+  type: 0 | 1 | 2;
 }
 
 interface Bullet {
@@ -44,21 +45,24 @@ interface AlienBullet {
   y: number;
   active: boolean;
   zigzag: number;
+  frame: number;
+}
+
+interface ShieldPixel {
+  alive: boolean;
 }
 
 interface Shield {
   x: number;
   y: number;
-  pixels: boolean[][];
+  pixels: ShieldPixel[][];
 }
 
 interface UFO {
   x: number;
-  y: number;
   active: boolean;
   dir: 1 | -1;
   pts: number;
-  speed: number;
 }
 
 interface Particle {
@@ -84,9 +88,8 @@ interface Star {
   x: number;
   y: number;
   r: number;
-  base: number;
+  phase: number;
   speed: number;
-  offset: number;
 }
 
 interface GameState {
@@ -95,541 +98,383 @@ interface GameState {
   hiScore: number;
   lives: number;
   wave: number;
+  tick: number;
+  // Aliens
   aliens: Alien[];
   alienDir: 1 | -1;
-  alienSpeed: number;
-  alienDropPending: boolean;
-  alienFrameTimer: number;
-  alienFrame: number;
-  alienMoveTimer: number;
-  alienShootTimer: number;
-  alienShootInterval: number;
-  playerX: number;
-  playerInvincible: boolean;
-  playerInvTimer: number;
-  playerVisible: boolean;
-  playerFlashTimer: number;
-  playerBullets: Bullet[];
+  alienStep: number;
+  alienMarchTick: number;
+  alienMarchPhase: number;
+  alienBulletCooldown: number;
   alienBullets: AlienBullet[];
+  // Player
+  playerX: number;
+  playerAlive: boolean;
+  playerRespawnTick: number;
+  bullet: Bullet;
+  // Shields
   shields: Shield[];
+  // UFO
   ufo: UFO;
-  ufoTimer: number;
-  ufoNextSpawn: number;
+  ufoCooldown: number;
+  // Effects
   particles: Particle[];
   popups: Popup[];
+  flashTick: number;
   stars: Star[];
-  waveClearTimer: number;
-  showWaveClear: boolean;
-  startAlienY: number;
+  // Audio
+  marchNote: number;
+  // Blinking for start/gameover
+  blinkTick: number;
+  // Wave transition
+  waveBannerTick: number;
 }
 
-// ─── Sound System ───────────────────────────────────────────────────────────
-let audioCtx: AudioContext | null = null;
-let ufoSoundInterval: ReturnType<typeof setInterval> | null = null;
-
-function ensureAudio() {
-  if (!audioCtx) {
-    audioCtx = new (
-      window.AudioContext ||
-      (window as { webkitAudioContext?: typeof AudioContext })
-        .webkitAudioContext!
-    )();
+// ─── Shield template ────────────────────────────────────────────────────────
+function makeShieldPixels(): ShieldPixel[][] {
+  const rows: ShieldPixel[][] = [];
+  for (let r = 0; r < SHIELD_ROWS_N; r++) {
+    const row: ShieldPixel[] = [];
+    for (let c = 0; c < SHIELD_COLS_N; c++) {
+      // Cut out corners to make classic arch shape
+      let alive = true;
+      if (r >= SHIELD_ROWS_N - 3 && c >= 3 && c <= SHIELD_COLS_N - 4)
+        alive = false; // inner notch
+      if (r === 0 && (c === 0 || c === SHIELD_COLS_N - 1)) alive = false;
+      if (r <= 1 && (c === 0 || c === SHIELD_COLS_N - 1)) alive = false;
+      row.push({ alive });
+    }
+    rows.push(row);
   }
+  return rows;
 }
 
-function playShoot() {
-  if (!audioCtx) return;
-  const ctx = audioCtx;
-  const now = ctx.currentTime;
-  const osc = ctx.createOscillator();
-  const gain = ctx.createGain();
-  osc.connect(gain);
-  gain.connect(ctx.destination);
-  osc.type = "square";
-  osc.frequency.setValueAtTime(880, now);
-  osc.frequency.linearRampToValueAtTime(440, now + 0.1);
-  gain.gain.setValueAtTime(0.08, now);
-  gain.gain.linearRampToValueAtTime(0, now + 0.1);
-  osc.start(now);
-  osc.stop(now + 0.11);
-}
-
-function playAlienDeath() {
-  if (!audioCtx) return;
-  const ctx = audioCtx;
-  const now = ctx.currentTime;
-  const sr = ctx.sampleRate;
-  const buf = ctx.createBuffer(1, sr * 0.25, sr);
-  const data = buf.getChannelData(0);
-  for (let i = 0; i < data.length; i++) {
-    data[i] = (Math.random() * 2 - 1) * (1 - i / data.length) * 0.6;
-  }
-  const src = ctx.createBufferSource();
-  src.buffer = buf;
-  const gain = ctx.createGain();
-  src.connect(gain);
-  gain.connect(ctx.destination);
-  gain.gain.setValueAtTime(0.35, now);
-  src.start(now);
-  const osc = ctx.createOscillator();
-  const g2 = ctx.createGain();
-  osc.connect(g2);
-  g2.connect(ctx.destination);
-  osc.frequency.setValueAtTime(220, now);
-  osc.frequency.linearRampToValueAtTime(55, now + 0.25);
-  g2.gain.setValueAtTime(0.18, now);
-  g2.gain.linearRampToValueAtTime(0, now + 0.25);
-  osc.start(now);
-  osc.stop(now + 0.26);
-}
-
-function playPlayerDeath() {
-  if (!audioCtx) return;
-  const ctx = audioCtx;
-  const now = ctx.currentTime;
-  const osc = ctx.createOscillator();
-  const gain = ctx.createGain();
-  osc.connect(gain);
-  gain.connect(ctx.destination);
-  osc.type = "sawtooth";
-  osc.frequency.setValueAtTime(440, now);
-  osc.frequency.linearRampToValueAtTime(55, now + 0.8);
-  gain.gain.setValueAtTime(0.25, now);
-  gain.gain.linearRampToValueAtTime(0, now + 0.8);
-  osc.start(now);
-  osc.stop(now + 0.82);
-}
-
-function playUFODeath() {
-  if (!audioCtx) return;
-  const ctx = audioCtx;
-  const now = ctx.currentTime;
-  const osc = ctx.createOscillator();
-  const gain = ctx.createGain();
-  osc.connect(gain);
-  gain.connect(ctx.destination);
-  osc.frequency.setValueAtTime(200, now);
-  osc.frequency.linearRampToValueAtTime(900, now + 0.4);
-  gain.gain.setValueAtTime(0.2, now);
-  gain.gain.linearRampToValueAtTime(0, now + 0.4);
-  osc.start(now);
-  osc.stop(now + 0.42);
-}
-
-function playGameOver() {
-  if (!audioCtx) return;
-  const ctx = audioCtx;
-  const now = ctx.currentTime;
-  const notes = [440, 392, 349, 311, 262, 220];
-  for (let i = 0; i < notes.length; i++) {
-    const freq = notes[i];
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.type = "sawtooth";
-    osc.frequency.setValueAtTime(freq, now + i * 0.22);
-    gain.gain.setValueAtTime(0.15, now + i * 0.22);
-    gain.gain.linearRampToValueAtTime(0, now + i * 0.22 + 0.2);
-    osc.start(now + i * 0.22);
-    osc.stop(now + i * 0.22 + 0.21);
-  }
-}
-
-function startUFOSound() {
-  stopUFOSound();
-  let toggle = false;
-  ufoSoundInterval = setInterval(() => {
-    if (!audioCtx) return;
-    const ctx = audioCtx;
-    const now = ctx.currentTime;
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.frequency.setValueAtTime(toggle ? 180 : 280, now);
-    gain.gain.setValueAtTime(0.04, now);
-    gain.gain.linearRampToValueAtTime(0, now + 0.15);
-    osc.start(now);
-    osc.stop(now + 0.16);
-    toggle = !toggle;
-  }, 200);
-}
-
-function stopUFOSound() {
-  if (ufoSoundInterval) {
-    clearInterval(ufoSoundInterval);
-    ufoSoundInterval = null;
-  }
-}
-
-// ─── Helpers ────────────────────────────────────────────────────────────────
-function createShields(): Shield[] {
-  const shieldW = SHIELD_COLS_N * SHIELD_PX;
-  const spacing = (CW - SHIELD_COUNT * shieldW) / (SHIELD_COUNT + 1);
+function makeShields(): Shield[] {
   const shields: Shield[] = [];
+  const spacing = CW / (SHIELD_COUNT + 1);
+  const sy = PLAYER_Y - 110;
   for (let i = 0; i < SHIELD_COUNT; i++) {
-    const sx = spacing + i * (shieldW + spacing);
-    const sy = PLAYER_Y - 110;
-    const pixels: boolean[][] = Array.from({ length: SHIELD_ROWS_N }, (_, r) =>
-      Array.from({ length: SHIELD_COLS_N }, (__, c) => {
-        if (r < 3 && (c < 2 || c >= SHIELD_COLS_N - 2)) return false;
-        if (r >= SHIELD_ROWS_N - 2 && c >= 4 && c <= 7) return false;
-        return true;
-      }),
-    );
-    shields.push({ x: sx, y: sy, pixels });
+    const sx = spacing * (i + 1) - (SHIELD_COLS_N * SHIELD_PX) / 2;
+    shields.push({ x: sx, y: sy, pixels: makeShieldPixels() });
   }
   return shields;
 }
 
-function createAliens(startAlienY: number): Alien[] {
+function makeAliens(): Alien[] {
   const aliens: Alien[] = [];
-  for (let row = 0; row < ALIEN_ROWS; row++) {
-    for (let col = 0; col < ALIEN_COLS; col++) {
-      const type: 0 | 1 | 2 = row === 0 ? 0 : row <= 2 ? 1 : 2;
+  for (let r = 0; r < ALIEN_ROWS; r++) {
+    const type = r === 0 ? 0 : r <= 2 ? 2 : 1; // squid top, octopus mid, crab bottom
+    for (let c = 0; c < ALIEN_COLS; c++) {
       aliens.push({
-        x: ALIEN_START_X + col * ALIEN_SX,
-        y: startAlienY + row * ALIEN_SY,
+        x: ALIEN_START_X + c * ALIEN_SX,
+        y: ALIEN_START_Y + r * ALIEN_SY,
         alive: true,
-        type,
+        type: type as 0 | 1 | 2,
       });
     }
   }
   return aliens;
 }
 
-function createStars(): Star[] {
-  return Array.from({ length: 120 }, () => ({
-    x: Math.random() * CW,
-    y: Math.random() * CH,
-    r: Math.random() * 1.5 + 0.4,
-    base: Math.random() * 0.5 + 0.3,
-    speed: Math.random() * 0.025 + 0.005,
-    offset: Math.random() * Math.PI * 2,
-  }));
-}
-
-function createInitialState(): GameState {
+function initialState(): GameState {
+  const hiScore = Number.parseInt(localStorage.getItem("si_hi") ?? "0", 10);
+  const stars: Star[] = [];
+  for (let i = 0; i < 70; i++) {
+    stars.push({
+      x: Math.random() * CW,
+      y: Math.random() * CH,
+      r: Math.random() * 1.4 + 0.3,
+      phase: Math.random() * Math.PI * 2,
+      speed: Math.random() * 0.04 + 0.01,
+    });
+  }
   return {
     screen: "START",
     score: 0,
-    hiScore: Number.parseInt(
-      localStorage.getItem("spaceInvaders_highScore") || "0",
-    ),
+    hiScore,
     lives: 3,
     wave: 1,
-    aliens: createAliens(ALIEN_START_Y),
+    tick: 0,
+    aliens: makeAliens(),
     alienDir: 1,
-    alienSpeed: 1.5,
-    alienDropPending: false,
-    alienFrameTimer: 0,
-    alienFrame: 0,
-    alienMoveTimer: 0,
-    alienShootTimer: 0,
-    alienShootInterval: 1500,
-    playerX: CW / 2,
-    playerInvincible: false,
-    playerInvTimer: 0,
-    playerVisible: true,
-    playerFlashTimer: 0,
-    playerBullets: [],
+    alienStep: 0,
+    alienMarchTick: 0,
+    alienMarchPhase: 0,
+    alienBulletCooldown: 90,
     alienBullets: [],
-    shields: createShields(),
-    ufo: { x: -200, y: UFO_Y, active: false, dir: 1, pts: 100, speed: 2 },
-    ufoTimer: 0,
-    ufoNextSpawn: 15000 + Math.random() * 10000,
+    playerX: CW / 2,
+    playerAlive: true,
+    playerRespawnTick: 0,
+    bullet: { x: 0, y: 0, active: false },
+    shields: makeShields(),
+    ufo: { x: -80, active: false, dir: 1, pts: 100 },
+    ufoCooldown: 600 + Math.floor(Math.random() * 400),
     particles: [],
     popups: [],
-    stars: createStars(),
-    waveClearTimer: 0,
-    showWaveClear: false,
-    startAlienY: ALIEN_START_Y,
+    flashTick: 0,
+    stars,
+    marchNote: 0,
+    blinkTick: 0,
+    waveBannerTick: 0,
   };
 }
 
-function resetForNewGame(gs: GameState): void {
-  gs.score = 0;
-  gs.lives = 3;
-  gs.wave = 1;
-  gs.alienDir = 1;
-  gs.alienSpeed = 1.5;
-  gs.alienDropPending = false;
-  gs.alienFrameTimer = 0;
-  gs.alienFrame = 0;
-  gs.alienMoveTimer = 0;
-  gs.alienShootTimer = 0;
-  gs.alienShootInterval = 1500;
-  gs.playerX = CW / 2;
-  gs.playerInvincible = false;
-  gs.playerInvTimer = 0;
-  gs.playerVisible = true;
-  gs.playerFlashTimer = 0;
-  gs.playerBullets = [];
-  gs.alienBullets = [];
-  gs.shields = createShields();
-  gs.ufo = { x: -200, y: UFO_Y, active: false, dir: 1, pts: 100, speed: 2 };
-  gs.ufoTimer = 0;
-  gs.ufoNextSpawn = 15000 + Math.random() * 10000;
-  gs.particles = [];
-  gs.popups = [];
-  gs.waveClearTimer = 0;
-  gs.showWaveClear = false;
-  gs.startAlienY = ALIEN_START_Y;
-  gs.aliens = createAliens(ALIEN_START_Y);
+// ─── Audio ───────────────────────────────────────────────────────────────────
+function createAudio(): AudioContext | null {
+  try {
+    return new (
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext: typeof AudioContext })
+        .webkitAudioContext
+    )();
+  } catch {
+    return null;
+  }
 }
 
-function resetWave(gs: GameState): void {
-  gs.wave++;
-  gs.alienDir = 1;
-  gs.alienDropPending = false;
-  gs.alienFrameTimer = 0;
-  gs.alienFrame = 0;
-  gs.alienMoveTimer = 0;
-  gs.alienShootTimer = 0;
-  gs.playerBullets = [];
-  gs.alienBullets = [];
-  gs.startAlienY = ALIEN_START_Y;
-  gs.aliens = createAliens(ALIEN_START_Y);
-  // Increase difficulty
-  gs.alienSpeed = Math.min(1.5 + gs.wave * 0.4, 6);
-  gs.alienShootInterval = Math.max(400, 1500 - gs.wave * 150);
+function playTone(
+  ctx: AudioContext | null,
+  freq: number,
+  duration: number,
+  type: OscillatorType = "square",
+  vol = 0.18,
+) {
+  if (!ctx) return;
+  try {
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(vol, ctx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + duration);
+    g.connect(ctx.destination);
+    const o = ctx.createOscillator();
+    o.type = type;
+    o.frequency.setValueAtTime(freq, ctx.currentTime);
+    o.connect(g);
+    o.start();
+    o.stop(ctx.currentTime + duration);
+  } catch {}
 }
 
-function getAlienPoints(type: 0 | 1 | 2): number {
-  return type === 0 ? 40 : type === 1 ? 20 : 10;
+function playNoise(ctx: AudioContext | null, duration: number, vol = 0.15) {
+  if (!ctx) return;
+  try {
+    const bufSize = Math.floor(ctx.sampleRate * duration);
+    const buf = ctx.createBuffer(1, bufSize, ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < bufSize; i++) data[i] = Math.random() * 2 - 1;
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(vol, ctx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + duration);
+    src.connect(g);
+    g.connect(ctx.destination);
+    src.start();
+  } catch {}
 }
 
-function aliveAliens(gs: GameState): Alien[] {
-  return gs.aliens.filter((a) => a.alive);
+const MARCH_FREQS = [160, 130, 100, 80];
+
+function playMarch(ctx: AudioContext | null, note: number) {
+  playTone(ctx, MARCH_FREQS[note % 4], 0.12, "square", 0.12);
 }
 
-function addExplosion(
-  gs: GameState,
+// ─── Drawing helpers ─────────────────────────────────────────────────────────
+function drawAlien(
+  ctx: CanvasRenderingContext2D,
   x: number,
   y: number,
-  color: string,
-  count = 8,
+  type: 0 | 1 | 2,
+  frame: number,
 ) {
-  for (let i = 0; i < count; i++) {
-    const angle = (i / count) * Math.PI * 2 + Math.random() * 0.5;
-    const speed = 1.5 + Math.random() * 3;
-    gs.particles.push({
-      x,
-      y,
-      vx: Math.cos(angle) * speed,
-      vy: Math.sin(angle) * speed,
-      life: 35 + Math.random() * 20,
-      maxLife: 55,
-      color,
-      size: 1.5 + Math.random() * 2,
-    });
-  }
-}
+  const cx = x + ALIEN_W / 2;
+  const cy = y + ALIEN_H / 2;
+  ctx.save();
 
-function addPopup(gs: GameState, x: number, y: number, text: string) {
-  gs.popups.push({ x, y, text, life: 70, maxLife: 70 });
-}
-
-function shieldHit(shield: Shield, bx: number, by: number): boolean {
-  const lx = bx - shield.x;
-  const ly = by - shield.y;
-  const col = Math.floor(lx / SHIELD_PX);
-  const row = Math.floor(ly / SHIELD_PX);
-  if (row < 0 || row >= SHIELD_ROWS_N || col < 0 || col >= SHIELD_COLS_N)
-    return false;
-  if (shield.pixels[row][col]) {
-    shield.pixels[row][col] = false;
-    // Erode neighboring pixels too (sometimes)
-    const neighbors = [
-      [row - 1, col],
-      [row + 1, col],
-      [row, col - 1],
-      [row, col + 1],
-    ];
-    for (const [nr, nc] of neighbors) {
-      if (
-        nr >= 0 &&
-        nr < SHIELD_ROWS_N &&
-        nc >= 0 &&
-        nc < SHIELD_COLS_N &&
-        Math.random() < 0.4
-      ) {
-        shield.pixels[nr][nc] = false;
-      }
-    }
-    return true;
-  }
-  return false;
-}
-
-// ─── Draw Helpers ────────────────────────────────────────────────────────────
-function drawAlien(ctx: CanvasRenderingContext2D, alien: Alien, frame: number) {
-  const { x, y, type } = alien;
-  const f = frame % 2;
-  ctx.shadowBlur = 8;
-
-  if (type === 2) {
-    // Crab - magenta
-    ctx.fillStyle = "#FF4FD1";
-    ctx.shadowColor = "#FF9BE8";
-    if (f === 0) {
-      ctx.fillRect(x + 6, y, 8, 4);
-      ctx.fillRect(x + 2, y + 4, 16, 4);
-      ctx.fillRect(x, y + 8, 20, 6);
-      ctx.fillRect(x + 4, y + 14, 4, 4);
-      ctx.fillRect(x + 12, y + 14, 4, 4);
-      ctx.fillRect(x, y + 12, 4, 4);
-      ctx.fillRect(x + 16, y + 12, 4, 4);
-      // eyes
-      ctx.fillStyle = "#FFE95A";
-      ctx.shadowColor = "#FFE95A";
-      ctx.fillRect(x + 4, y + 10, 3, 3);
-      ctx.fillRect(x + 13, y + 10, 3, 3);
+  if (type === 0) {
+    // Squid — top row, magenta
+    ctx.fillStyle = "#ff55ff";
+    // Body (round)
+    ctx.beginPath();
+    ctx.ellipse(cx, cy - 2, 10, 9, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Eyes
+    ctx.fillStyle = "#000";
+    ctx.fillRect(cx - 6, cy - 5, 3, 3);
+    ctx.fillRect(cx + 3, cy - 5, 3, 3);
+    // Antennae
+    ctx.fillStyle = "#ff55ff";
+    ctx.fillRect(cx - 9, cy - 14, 2, 5);
+    ctx.fillRect(cx + 7, cy - 14, 2, 5);
+    ctx.fillRect(cx - 12, cy - 18, 3, 4);
+    ctx.fillRect(cx + 9, cy - 18, 3, 4);
+    // Tentacles
+    if (frame === 0) {
+      ctx.fillRect(cx - 13, cy + 5, 3, 5);
+      ctx.fillRect(cx - 7, cy + 5, 3, 5);
+      ctx.fillRect(cx + 4, cy + 5, 3, 5);
+      ctx.fillRect(cx + 10, cy + 5, 3, 5);
     } else {
-      ctx.fillRect(x + 6, y, 8, 4);
-      ctx.fillRect(x + 2, y + 4, 16, 4);
-      ctx.fillRect(x, y + 8, 20, 6);
-      ctx.fillRect(x + 2, y + 14, 4, 4);
-      ctx.fillRect(x + 14, y + 14, 4, 4);
-      ctx.fillRect(x + 2, y + 8, 2, 6);
-      ctx.fillRect(x + 16, y + 8, 2, 6);
-      ctx.fillStyle = "#FFE95A";
-      ctx.shadowColor = "#FFE95A";
-      ctx.fillRect(x + 4, y + 10, 3, 3);
-      ctx.fillRect(x + 13, y + 10, 3, 3);
+      ctx.fillRect(cx - 14, cy + 4, 3, 6);
+      ctx.fillRect(cx - 6, cy + 6, 3, 4);
+      ctx.fillRect(cx + 3, cy + 6, 3, 4);
+      ctx.fillRect(cx + 11, cy + 4, 3, 6);
     }
   } else if (type === 1) {
-    // Octopus - green
-    ctx.fillStyle = "#38FF6F";
-    ctx.shadowColor = "#A6FFD0";
-    if (f === 0) {
-      ctx.fillRect(x + 6, y, 8, 4);
-      ctx.fillRect(x + 2, y + 4, 16, 4);
-      ctx.fillRect(x, y + 8, 20, 6);
-      ctx.fillRect(x + 2, y + 14, 4, 4);
-      ctx.fillRect(x + 14, y + 14, 4, 4);
-      ctx.fillRect(x, y + 14, 2, 4);
-      ctx.fillRect(x + 18, y + 14, 2, 4);
-      ctx.fillStyle = "#FFE95A";
-      ctx.shadowColor = "#FFE95A";
-      ctx.fillRect(x + 4, y + 10, 3, 3);
-      ctx.fillRect(x + 13, y + 10, 3, 3);
+    // Crab — bottom rows, cyan
+    ctx.fillStyle = "#44ffff";
+    // Body
+    ctx.fillRect(cx - 14, cy - 6, 28, 14);
+    ctx.fillRect(cx - 10, cy - 11, 20, 7);
+    // Claws
+    if (frame === 0) {
+      ctx.fillRect(cx - 20, cy - 3, 8, 10);
+      ctx.fillRect(cx + 12, cy - 3, 8, 10);
     } else {
-      ctx.fillRect(x + 6, y, 8, 4);
-      ctx.fillRect(x + 2, y + 4, 16, 4);
-      ctx.fillRect(x, y + 8, 20, 6);
-      ctx.fillRect(x + 0, y + 14, 4, 4);
-      ctx.fillRect(x + 16, y + 14, 4, 4);
-      ctx.fillRect(x + 4, y + 18, 2, 3);
-      ctx.fillRect(x + 14, y + 18, 2, 3);
-      ctx.fillStyle = "#FFE95A";
-      ctx.shadowColor = "#FFE95A";
-      ctx.fillRect(x + 4, y + 10, 3, 3);
-      ctx.fillRect(x + 13, y + 10, 3, 3);
+      ctx.fillRect(cx - 22, cy - 8, 8, 10);
+      ctx.fillRect(cx + 14, cy - 8, 8, 10);
     }
+    // Eyes
+    ctx.fillStyle = "#000";
+    ctx.fillRect(cx - 7, cy - 9, 3, 4);
+    ctx.fillRect(cx + 4, cy - 9, 3, 4);
+    // Legs
+    ctx.fillStyle = "#44ffff";
+    ctx.fillRect(cx - 12, cy + 7, 3, 6);
+    ctx.fillRect(cx - 4, cy + 7, 3, 6);
+    ctx.fillRect(cx + 1, cy + 7, 3, 6);
+    ctx.fillRect(cx + 9, cy + 7, 3, 6);
   } else {
-    // Squid - cyan
-    ctx.fillStyle = "#40F3FF";
-    ctx.shadowColor = "#40F3FF";
-    if (f === 0) {
-      ctx.fillRect(x + 8, y, 4, 4);
-      ctx.fillRect(x + 4, y + 4, 12, 4);
-      ctx.fillRect(x + 2, y + 8, 16, 6);
-      ctx.fillRect(x + 2, y + 14, 4, 4);
-      ctx.fillRect(x + 14, y + 14, 4, 4);
-      ctx.fillStyle = "#FFE95A";
-      ctx.shadowColor = "#FFE95A";
-      ctx.fillRect(x + 5, y + 10, 3, 3);
-      ctx.fillRect(x + 12, y + 10, 3, 3);
+    // Octopus — mid rows, yellow-green
+    ctx.fillStyle = "#aaff44";
+    // Head dome
+    ctx.beginPath();
+    ctx.arc(cx, cy - 4, 12, Math.PI, 0);
+    ctx.fill();
+    // Body
+    ctx.fillRect(cx - 12, cy - 4, 24, 10);
+    // Eyes
+    ctx.fillStyle = "#000";
+    ctx.fillRect(cx - 7, cy - 8, 4, 4);
+    ctx.fillRect(cx + 3, cy - 8, 4, 4);
+    // Tentacles
+    ctx.fillStyle = "#aaff44";
+    if (frame === 0) {
+      ctx.fillRect(cx - 14, cy + 5, 4, 7);
+      ctx.fillRect(cx - 6, cy + 5, 4, 7);
+      ctx.fillRect(cx + 2, cy + 5, 4, 7);
+      ctx.fillRect(cx + 10, cy + 5, 4, 7);
     } else {
-      ctx.fillRect(x + 8, y, 4, 4);
-      ctx.fillRect(x + 4, y + 4, 12, 4);
-      ctx.fillRect(x + 2, y + 8, 16, 6);
-      ctx.fillRect(x + 4, y + 14, 4, 4);
-      ctx.fillRect(x + 12, y + 14, 4, 4);
-      ctx.fillRect(x, y + 10, 3, 3);
-      ctx.fillRect(x + 17, y + 10, 3, 3);
-      ctx.fillStyle = "#FFE95A";
-      ctx.shadowColor = "#FFE95A";
-      ctx.fillRect(x + 5, y + 10, 3, 3);
-      ctx.fillRect(x + 12, y + 10, 3, 3);
+      ctx.fillRect(cx - 15, cy + 7, 4, 7);
+      ctx.fillRect(cx - 5, cy + 3, 4, 7);
+      ctx.fillRect(cx + 1, cy + 3, 4, 7);
+      ctx.fillRect(cx + 11, cy + 7, 4, 7);
     }
   }
-  ctx.shadowBlur = 0;
+  ctx.restore();
 }
 
-function drawPlayer(ctx: CanvasRenderingContext2D, x: number) {
-  ctx.fillStyle = "#40F3FF";
-  ctx.shadowColor = "#40F3FF";
-  ctx.shadowBlur = 14;
-  // base
-  ctx.fillRect(x - PLAYER_W / 2, PLAYER_Y + 12, PLAYER_W, 8);
-  // cockpit
-  ctx.fillRect(x - 5, PLAYER_Y + 4, 10, 12);
-  // nose
-  ctx.fillRect(x - 2, PLAYER_Y, 4, 6);
-  // left wing
-  ctx.beginPath();
-  ctx.moveTo(x - PLAYER_W / 2, PLAYER_Y + 20);
-  ctx.lineTo(x - PLAYER_W / 2 - 6, PLAYER_Y + 20);
-  ctx.lineTo(x - PLAYER_W / 2, PLAYER_Y + 12);
-  ctx.fill();
-  // right wing
-  ctx.beginPath();
-  ctx.moveTo(x + PLAYER_W / 2, PLAYER_Y + 20);
-  ctx.lineTo(x + PLAYER_W / 2 + 6, PLAYER_Y + 20);
-  ctx.lineTo(x + PLAYER_W / 2, PLAYER_Y + 12);
-  ctx.fill();
-  // engine glow
-  ctx.fillStyle = "#FFE95A";
-  ctx.shadowColor = "#FFE95A";
-  ctx.shadowBlur = 10;
-  ctx.fillRect(x - 5, PLAYER_Y + 20, 10, 3);
-  ctx.shadowBlur = 0;
+function drawPlayer(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  alive: boolean,
+  tick: number,
+) {
+  if (!alive) return;
+  const px = x - PLAYER_W / 2;
+  ctx.save();
+  // Flicker when spawning
+  const alpha = 1;
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = "#33ff33";
+  // Body
+  ctx.fillRect(px + 4, PLAYER_Y + 8, PLAYER_W - 8, 18);
+  // Cannon
+  ctx.fillRect(px + PLAYER_W / 2 - 3, PLAYER_Y, 6, 12);
+  // Wings
+  ctx.fillRect(px, PLAYER_Y + 14, 12, 12);
+  ctx.fillRect(px + PLAYER_W - 12, PLAYER_Y + 14, 12, 12);
+  // Detail
+  ctx.fillStyle = "#00aa00";
+  ctx.fillRect(px + 8, PLAYER_Y + 10, PLAYER_W - 16, 8);
+  ctx.restore();
+  void tick;
+}
+
+function drawBullet(ctx: CanvasRenderingContext2D, b: Bullet) {
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(b.x - 2, b.y - 9, 4, 10);
+}
+
+function drawAlienBullet(ctx: CanvasRenderingContext2D, b: AlienBullet) {
+  ctx.fillStyle = "#ff4444";
+  const zx = Math.sin(b.frame * 0.4) * 3;
+  ctx.fillRect(b.x + zx - 2, b.y - 8, 4, 10);
+}
+
+function drawShields(ctx: CanvasRenderingContext2D, shields: Shield[]) {
+  ctx.fillStyle = "#33ff44";
+  for (const sh of shields) {
+    for (let r = 0; r < SHIELD_ROWS_N; r++) {
+      for (let c = 0; c < SHIELD_COLS_N; c++) {
+        if (sh.pixels[r][c].alive) {
+          ctx.fillRect(
+            sh.x + c * SHIELD_PX,
+            sh.y + r * SHIELD_PX,
+            SHIELD_PX - 1,
+            SHIELD_PX - 1,
+          );
+        }
+      }
+    }
+  }
 }
 
 function drawUFO(ctx: CanvasRenderingContext2D, ufo: UFO) {
-  ctx.shadowColor = "#FF4A4A";
-  ctx.shadowBlur = 18;
-  // hull
-  ctx.fillStyle = "#FF4A4A";
+  if (!ufo.active) return;
+  ctx.save();
+  ctx.fillStyle = "#ff2222";
+  // Saucer body
   ctx.beginPath();
-  ctx.ellipse(ufo.x, ufo.y, 30, 11, 0, 0, Math.PI * 2);
+  ctx.ellipse(ufo.x, UFO_Y + 8, 24, 10, 0, 0, Math.PI * 2);
   ctx.fill();
-  // dome
-  ctx.fillStyle = "#FF9BE8";
-  ctx.shadowColor = "#FF9BE8";
-  ctx.shadowBlur = 10;
+  // Dome
+  ctx.fillStyle = "#ff8888";
   ctx.beginPath();
-  ctx.ellipse(ufo.x, ufo.y - 7, 16, 9, 0, Math.PI, 0);
+  ctx.ellipse(ufo.x, UFO_Y + 4, 14, 8, 0, Math.PI, 0);
   ctx.fill();
-  // lights
-  ctx.fillStyle = "#FFE95A";
-  ctx.shadowColor = "#FFE95A";
-  ctx.shadowBlur = 6;
+  // Windows
+  ctx.fillStyle = "#fff";
   for (let i = -2; i <= 2; i++) {
     ctx.beginPath();
-    ctx.arc(ufo.x + i * 10, ufo.y + 3, 2.5, 0, Math.PI * 2);
+    ctx.arc(ufo.x + i * 8, UFO_Y + 8, 2.5, 0, Math.PI * 2);
     ctx.fill();
   }
-  ctx.shadowBlur = 0;
+  ctx.restore();
 }
 
-function drawShield(ctx: CanvasRenderingContext2D, shield: Shield) {
-  ctx.shadowBlur = 0;
-  for (let r = 0; r < SHIELD_ROWS_N; r++) {
-    for (let c = 0; c < SHIELD_COLS_N; c++) {
-      if (shield.pixels[r][c]) {
-        ctx.fillStyle = "#36FF7A";
-        ctx.fillRect(
-          shield.x + c * SHIELD_PX,
-          shield.y + r * SHIELD_PX,
-          SHIELD_PX - 1,
-          SHIELD_PX - 1,
-        );
-      }
-    }
+function drawParticles(ctx: CanvasRenderingContext2D, particles: Particle[]) {
+  for (const p of particles) {
+    const a = p.life / p.maxLife;
+    ctx.save();
+    ctx.globalAlpha = a;
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size * a, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawPopups(ctx: CanvasRenderingContext2D, popups: Popup[]) {
+  for (const p of popups) {
+    const a = p.life / p.maxLife;
+    ctx.save();
+    ctx.globalAlpha = a;
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "bold 13px 'GeistMono', monospace";
+    ctx.textAlign = "center";
+    ctx.fillText(p.text, p.x, p.y);
+    ctx.restore();
   }
 }
 
@@ -637,825 +482,645 @@ function drawHUD(
   ctx: CanvasRenderingContext2D,
   score: number,
   hiScore: number,
-  lives: number,
   wave: number,
+  lives: number,
+  playerX: number,
 ) {
-  // Background bar
-  ctx.fillStyle = "rgba(7, 10, 20, 0.85)";
+  // Background
+  ctx.fillStyle = "#111";
   ctx.fillRect(0, 0, CW, HUD_H);
-  ctx.strokeStyle = "#1A2136";
+  // Separator line
+  ctx.strokeStyle = "#33ff44";
   ctx.lineWidth = 1;
   ctx.beginPath();
-  ctx.moveTo(0, HUD_H);
-  ctx.lineTo(CW, HUD_H);
+  ctx.moveTo(0, HUD_H - 1);
+  ctx.lineTo(CW, HUD_H - 1);
   ctx.stroke();
-
-  ctx.font = '10px "Press Start 2P", monospace';
-  ctx.textBaseline = "middle";
-
   // Score
-  ctx.fillStyle = "#A8ADBE";
-  ctx.shadowBlur = 0;
-  ctx.fillText("SCORE", 16, 18);
-  ctx.fillStyle = "#36FF7A";
-  ctx.shadowColor = "#36FF7A";
-  ctx.shadowBlur = 8;
-  ctx.fillText(score.toString().padStart(5, "0"), 16, 38);
-
+  ctx.fillStyle = "#aaffaa";
+  ctx.font = "12px 'GeistMono', monospace";
+  ctx.textAlign = "left";
+  ctx.fillText("SCORE", 20, 18);
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "bold 20px 'GeistMono', monospace";
+  ctx.fillText(String(score).padStart(6, "0"), 20, 42);
   // Hi-score
-  ctx.fillStyle = "#A8ADBE";
-  ctx.shadowBlur = 0;
-  const hiTxt = "HI-SCORE";
-  const hiW = ctx.measureText(hiTxt).width;
-  ctx.fillText(hiTxt, CW / 2 - hiW / 2, 18);
-  ctx.fillStyle = "#FFE95A";
-  ctx.shadowColor = "#FFE95A";
-  ctx.shadowBlur = 8;
-  const hiValTxt = hiScore.toString().padStart(5, "0");
-  const hiValW = ctx.measureText(hiValTxt).width;
-  ctx.fillText(hiValTxt, CW / 2 - hiValW / 2, 38);
-
+  ctx.fillStyle = "#aaffaa";
+  ctx.font = "12px 'GeistMono', monospace";
+  ctx.textAlign = "center";
+  ctx.fillText("HI-SCORE", CW / 2, 18);
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "bold 20px 'GeistMono', monospace";
+  ctx.fillText(String(hiScore).padStart(6, "0"), CW / 2, 42);
   // Wave
-  ctx.fillStyle = "#A8ADBE";
-  ctx.shadowBlur = 0;
-  ctx.fillText(`WAVE ${wave}`, CW - 200, 18);
-
+  ctx.fillStyle = "#aaffaa";
+  ctx.font = "12px 'GeistMono', monospace";
+  ctx.textAlign = "right";
+  ctx.fillText("WAVE", CW - 20, 18);
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "bold 20px 'GeistMono', monospace";
+  ctx.fillText(String(wave), CW - 20, 42);
   // Lives
-  ctx.fillStyle = "#FF4FD1";
-  ctx.shadowColor = "#FF4FD1";
-  ctx.shadowBlur = 8;
-  let heartsX = CW - 200;
+  ctx.fillStyle = "#33ff33";
   for (let i = 0; i < lives; i++) {
-    ctx.fillText("\u2665", heartsX + i * 22, 38);
+    const lx = 22 + i * 36;
+    const ly = HUD_H - 12;
+    // mini ship
+    ctx.fillRect(lx - 8, ly + 2, 16, 7);
+    ctx.fillRect(lx - 2, ly - 2, 4, 5);
   }
-  ctx.shadowBlur = 0;
+  void playerX;
 }
 
-// ─── Main Component ─────────────────────────────────────────────────────────
+function drawStars(ctx: CanvasRenderingContext2D, stars: Star[], tick: number) {
+  for (const s of stars) {
+    const a = 0.4 + 0.6 * Math.abs(Math.sin(tick * s.speed + s.phase));
+    ctx.save();
+    ctx.globalAlpha = a;
+    ctx.fillStyle = "#ffffff";
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+// ─── Collision helpers ────────────────────────────────────────────────────────
+function bulletHitsShields(
+  bx: number,
+  by: number,
+  shields: Shield[],
+  isAlien: boolean,
+): boolean {
+  for (const sh of shields) {
+    for (let r = 0; r < SHIELD_ROWS_N; r++) {
+      for (let c = 0; c < SHIELD_COLS_N; c++) {
+        if (!sh.pixels[r][c].alive) continue;
+        const px = sh.x + c * SHIELD_PX;
+        const py = sh.y + r * SHIELD_PX;
+        if (
+          bx >= px &&
+          bx <= px + SHIELD_PX &&
+          by >= py &&
+          by <= py + SHIELD_PX
+        ) {
+          sh.pixels[r][c].alive = false;
+          // Crater effect — destroy neighbours
+          const spread = isAlien ? 1 : 1;
+          for (let dr = -spread; dr <= spread; dr++) {
+            for (let dc = -spread; dc <= spread; dc++) {
+              const nr = r + dr;
+              const nc = c + dc;
+              if (
+                nr >= 0 &&
+                nr < SHIELD_ROWS_N &&
+                nc >= 0 &&
+                nc < SHIELD_COLS_N
+              ) {
+                if (Math.random() < 0.6) sh.pixels[nr][nc].alive = false;
+              }
+            }
+          }
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+function spawnExplosion(
+  particles: Particle[],
+  x: number,
+  y: number,
+  color: string,
+  count = 12,
+) {
+  for (let i = 0; i < count; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = Math.random() * 3 + 1;
+    particles.push({
+      x,
+      y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      life: 1,
+      maxLife: 1,
+      color,
+      size: Math.random() * 4 + 2,
+    });
+  }
+}
+
+// ─── Wave speed ──────────────────────────────────────────────────────────────
+function alienMarchInterval(aliveCount: number, wave: number): number {
+  const base = Math.max(4, 60 - wave * 5);
+  const factor = Math.max(0.1, aliveCount / (ALIEN_COLS * ALIEN_ROWS));
+  return Math.max(4, Math.floor(base * factor));
+}
+
+// ─── Main component ──────────────────────────────────────────────────────────
 export default function SpaceInvaders() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const gsRef = useRef<GameState>(createInitialState());
+  const gsRef = useRef<GameState>(initialState());
   const keysRef = useRef<Set<string>>(new Set());
+  const audioRef = useRef<AudioContext | null>(null);
   const rafRef = useRef<number>(0);
-  const lastTRef = useRef<number>(0);
-  const canShootRef = useRef(true);
-  const shootCooldownRef = useRef(0);
 
-  const handleRestart = useCallback(() => {
-    const gs = gsRef.current;
-    resetForNewGame(gs);
-    gs.screen = "PLAYING";
+  const startGame = useCallback((gs: GameState) => {
+    const hi = gs.hiScore;
+    const stars = gs.stars;
+    const next = initialState();
+    next.screen = "PLAYING";
+    next.hiScore = hi;
+    next.stars = stars;
+    return next;
   }, []);
+
+  const nextWave = useCallback((gs: GameState) => {
+    gs.wave++;
+    gs.aliens = makeAliens();
+    gs.alienDir = 1;
+    gs.alienStep = 0;
+    gs.alienMarchTick = 0;
+    gs.alienBullets = [];
+    gs.bullet.active = false;
+    gs.ufo.active = false;
+    gs.ufoCooldown = 500 + Math.floor(Math.random() * 400);
+    gs.waveBannerTick = 120;
+  }, []);
+
+  const loop = useCallback(() => {
+    const gs = gsRef.current;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    gs.tick++;
+    gs.blinkTick++;
+
+    // ── Input on start/gameover ──────────────────────────────────────────────
+    if (gs.screen === "START" && keysRef.current.has(" ")) {
+      keysRef.current.delete(" ");
+      gsRef.current = startGame(gs);
+      rafRef.current = requestAnimationFrame(loop);
+      return;
+    }
+    if (gs.screen === "GAME_OVER" && keysRef.current.has(" ")) {
+      keysRef.current.delete(" ");
+      gsRef.current = startGame(gs);
+      rafRef.current = requestAnimationFrame(loop);
+      return;
+    }
+
+    // ── Game logic ───────────────────────────────────────────────────────────
+    if (gs.screen === "PLAYING") {
+      // Wave banner countdown
+      if (gs.waveBannerTick > 0) {
+        gs.waveBannerTick--;
+      }
+
+      const aliveAliens = gs.aliens.filter((a) => a.alive);
+      const aliveCount = aliveAliens.length;
+
+      // Player movement
+      if (gs.playerAlive) {
+        if (keysRef.current.has("ArrowLeft") || keysRef.current.has("a")) {
+          gs.playerX = Math.max(PLAYER_W / 2 + 4, gs.playerX - PLAYER_SPEED);
+        }
+        if (keysRef.current.has("ArrowRight") || keysRef.current.has("d")) {
+          gs.playerX = Math.min(
+            CW - PLAYER_W / 2 - 4,
+            gs.playerX + PLAYER_SPEED,
+          );
+        }
+        // Shoot
+        if (keysRef.current.has(" ") && !gs.bullet.active) {
+          keysRef.current.delete(" ");
+          gs.bullet = { x: gs.playerX, y: PLAYER_Y, active: true };
+          playTone(audioRef.current, 880, 0.08, "square", 0.15);
+        }
+      }
+
+      // Player bullet movement
+      if (gs.bullet.active) {
+        gs.bullet.y -= BULLET_SPEED;
+        if (gs.bullet.y < HUD_H) {
+          gs.bullet.active = false;
+        } else {
+          // Hit shield
+          if (bulletHitsShields(gs.bullet.x, gs.bullet.y, gs.shields, false)) {
+            gs.bullet.active = false;
+          } else {
+            // Hit alien
+            let hit = false;
+            for (const alien of gs.aliens) {
+              if (!alien.alive) continue;
+              if (
+                gs.bullet.x >= alien.x - 4 &&
+                gs.bullet.x <= alien.x + ALIEN_W + 4 &&
+                gs.bullet.y >= alien.y - 4 &&
+                gs.bullet.y <= alien.y + ALIEN_H + 4
+              ) {
+                alien.alive = false;
+                gs.bullet.active = false;
+                const pts = alien.type === 0 ? 30 : alien.type === 1 ? 10 : 20;
+                gs.score += pts;
+                if (gs.score > gs.hiScore) {
+                  gs.hiScore = gs.score;
+                  localStorage.setItem("si_hi", String(gs.hiScore));
+                }
+                spawnExplosion(
+                  gs.particles,
+                  alien.x + ALIEN_W / 2,
+                  alien.y + ALIEN_H / 2,
+                  alien.type === 0
+                    ? "#ff88ff"
+                    : alien.type === 1
+                      ? "#88ffff"
+                      : "#aaff44",
+                  14,
+                );
+                gs.popups.push({
+                  x: alien.x + ALIEN_W / 2,
+                  y: alien.y,
+                  text: `+${pts}`,
+                  life: 1,
+                  maxLife: 1,
+                });
+                playNoise(audioRef.current, 0.18, 0.2);
+                hit = true;
+                break;
+              }
+            }
+            // Hit UFO
+            if (!hit && gs.ufo.active) {
+              if (
+                Math.abs(gs.bullet.x - gs.ufo.x) < 28 &&
+                Math.abs(gs.bullet.y - UFO_Y) < 14
+              ) {
+                gs.ufo.active = false;
+                gs.bullet.active = false;
+                gs.score += gs.ufo.pts;
+                if (gs.score > gs.hiScore) {
+                  gs.hiScore = gs.score;
+                  localStorage.setItem("si_hi", String(gs.hiScore));
+                }
+                spawnExplosion(gs.particles, gs.ufo.x, UFO_Y, "#ff4444", 18);
+                gs.popups.push({
+                  x: gs.ufo.x,
+                  y: UFO_Y - 10,
+                  text: `+${gs.ufo.pts}`,
+                  life: 1,
+                  maxLife: 1,
+                });
+                playTone(audioRef.current, 440, 0.5, "sawtooth", 0.25);
+              }
+            }
+          }
+        }
+      }
+
+      // Alien marching
+      gs.alienMarchTick++;
+      const marchInterval = alienMarchInterval(aliveCount, gs.wave);
+      if (gs.alienMarchTick >= marchInterval) {
+        gs.alienMarchTick = 0;
+        gs.alienMarchPhase = (gs.alienMarchPhase + 1) % 2;
+        // Play march sound
+        gs.marchNote = (gs.marchNote + 1) % 4;
+        playMarch(audioRef.current, gs.marchNote);
+
+        // Check if grid needs to drop
+        let dropDown = false;
+        const step = 6 + Math.min(gs.wave * 0.5, 4);
+        for (const alien of aliveAliens) {
+          if (gs.alienDir === 1 && alien.x + ALIEN_W >= CW - 8) {
+            dropDown = true;
+            break;
+          }
+          if (gs.alienDir === -1 && alien.x <= 8) {
+            dropDown = true;
+            break;
+          }
+        }
+        if (dropDown) {
+          for (const alien of gs.aliens) {
+            alien.y += 18;
+          }
+          gs.alienDir = gs.alienDir === 1 ? -1 : 1;
+        } else {
+          for (const alien of gs.aliens) {
+            alien.x += gs.alienDir * step;
+          }
+        }
+      }
+
+      // Check aliens reached bottom
+      for (const alien of aliveAliens) {
+        if (alien.y + ALIEN_H >= PLAYER_Y - 10) {
+          // Game over
+          gs.screen = "GAME_OVER";
+          playNoise(audioRef.current, 1.0, 0.3);
+          break;
+        }
+      }
+
+      // Alien bullet fire
+      const bulletSpeed = ALIEN_BULLET_SPEED_BASE + gs.wave * 0.3;
+      gs.alienBulletCooldown--;
+      if (gs.alienBulletCooldown <= 0 && aliveCount > 0) {
+        const cooldownBase = Math.max(20, 70 - gs.wave * 6);
+        gs.alienBulletCooldown = cooldownBase + Math.floor(Math.random() * 30);
+        // Pick random alive alien from bottom row of each column
+        const cols: Record<number, Alien> = {};
+        for (const alien of aliveAliens) {
+          const col = Math.round((alien.x - ALIEN_START_X) / ALIEN_SX);
+          if (!cols[col] || alien.y > cols[col].y) cols[col] = alien;
+        }
+        const candidates = Object.values(cols);
+        if (candidates.length > 0) {
+          const shooter =
+            candidates[Math.floor(Math.random() * candidates.length)];
+          gs.alienBullets.push({
+            x: shooter.x + ALIEN_W / 2,
+            y: shooter.y + ALIEN_H,
+            active: true,
+            zigzag: 0,
+            frame: 0,
+          });
+        }
+      }
+
+      // Move alien bullets
+      for (const ab of gs.alienBullets) {
+        if (!ab.active) continue;
+        ab.y += bulletSpeed;
+        ab.frame++;
+        if (ab.y > CH) {
+          ab.active = false;
+          continue;
+        }
+        // Hit shield
+        if (bulletHitsShields(ab.x, ab.y, gs.shields, true)) {
+          ab.active = false;
+          continue;
+        }
+        // Hit player
+        if (
+          gs.playerAlive &&
+          Math.abs(ab.x - gs.playerX) < PLAYER_W / 2 + 4 &&
+          ab.y >= PLAYER_Y - 4 &&
+          ab.y <= PLAYER_Y + PLAYER_H + 4
+        ) {
+          ab.active = false;
+          gs.lives--;
+          gs.flashTick = 30;
+          spawnExplosion(
+            gs.particles,
+            gs.playerX,
+            PLAYER_Y + PLAYER_H / 2,
+            "#33ff33",
+            20,
+          );
+          playNoise(audioRef.current, 0.6, 0.3);
+          if (gs.lives <= 0) {
+            gs.playerAlive = false;
+            gs.screen = "GAME_OVER";
+          } else {
+            gs.playerAlive = false;
+            gs.playerRespawnTick = 90;
+          }
+        }
+      }
+      gs.alienBullets = gs.alienBullets.filter((b) => b.active);
+
+      // Player respawn
+      if (!gs.playerAlive && gs.screen === "PLAYING") {
+        gs.playerRespawnTick--;
+        if (gs.playerRespawnTick <= 0) {
+          gs.playerAlive = true;
+          gs.playerX = CW / 2;
+        }
+      }
+
+      // UFO logic
+      gs.ufoCooldown--;
+      if (gs.ufoCooldown <= 0 && !gs.ufo.active) {
+        gs.ufo.active = true;
+        gs.ufo.dir = Math.random() < 0.5 ? 1 : -1;
+        gs.ufo.x = gs.ufo.dir === 1 ? -40 : CW + 40;
+        gs.ufo.pts = [50, 100, 150, 200, 250, 300][
+          Math.floor(Math.random() * 6)
+        ];
+        gs.ufoCooldown = 600 + Math.floor(Math.random() * 500);
+      }
+      if (gs.ufo.active) {
+        gs.ufo.x += gs.ufo.dir * 2.5;
+        // UFO sound
+        if (gs.tick % 10 === 0) {
+          playTone(
+            audioRef.current,
+            gs.tick % 20 === 0 ? 220 : 280,
+            0.09,
+            "sawtooth",
+            0.07,
+          );
+        }
+        if (gs.ufo.x > CW + 60 || gs.ufo.x < -60) {
+          gs.ufo.active = false;
+        }
+      }
+
+      // Particles
+      for (const p of gs.particles) {
+        p.x += p.vx;
+        p.y += p.vy;
+        p.vy += 0.05;
+        p.life -= 0.025;
+      }
+      gs.particles = gs.particles.filter((p) => p.life > 0);
+
+      // Popups
+      for (const p of gs.popups) {
+        p.y -= 1;
+        p.life -= 0.025;
+      }
+      gs.popups = gs.popups.filter((p) => p.life > 0);
+
+      // Flash
+      if (gs.flashTick > 0) gs.flashTick--;
+
+      // Check wave cleared
+      if (aliveCount === 0) {
+        nextWave(gs);
+      }
+    }
+
+    // ── Draw ─────────────────────────────────────────────────────────────────
+    ctx.clearRect(0, 0, CW, CH);
+
+    // Background
+    if (gs.flashTick > 0 && gs.tick % 4 < 2) {
+      ctx.fillStyle = "#220000";
+    } else {
+      ctx.fillStyle = "#020510";
+    }
+    ctx.fillRect(0, 0, CW, CH);
+
+    // Stars
+    drawStars(ctx, gs.stars, gs.tick);
+
+    if (gs.screen === "START") {
+      drawHUD(ctx, 0, gs.hiScore, 1, 3, CW / 2);
+      // Title
+      ctx.fillStyle = "#33ff44";
+      ctx.font = "bold 56px 'GeistMono', monospace";
+      ctx.textAlign = "center";
+      ctx.shadowColor = "#33ff44";
+      ctx.shadowBlur = 20;
+      ctx.fillText("SPACE INVADERS", CW / 2, CH / 2 - 100);
+      ctx.shadowBlur = 0;
+      // Score guide
+      const guide = [
+        { type: 0 as const, pts: "= 30 PTS" },
+        { type: 2 as const, pts: "= 20 PTS" },
+        { type: 1 as const, pts: "= 10 PTS" },
+      ];
+      guide.forEach((g, i) => {
+        const gy = CH / 2 - 20 + i * 60;
+        drawAlien(ctx, CW / 2 - 70, gy - 16, g.type, 0);
+        ctx.fillStyle = "#ffffff";
+        ctx.font = "18px 'GeistMono', monospace";
+        ctx.textAlign = "left";
+        ctx.fillText(g.pts, CW / 2 - 10, gy + 4);
+      });
+      // Blink
+      if (Math.floor(gs.blinkTick / 30) % 2 === 0) {
+        ctx.fillStyle = "#ffff44";
+        ctx.font = "bold 22px 'GeistMono', monospace";
+        ctx.textAlign = "center";
+        ctx.fillText("PRESS SPACE TO START", CW / 2, CH - 70);
+      }
+    } else if (gs.screen === "GAME_OVER") {
+      drawHUD(ctx, gs.score, gs.hiScore, gs.wave, gs.lives, gs.playerX);
+      drawStars(ctx, gs.stars, gs.tick);
+      ctx.fillStyle = "#ff2222";
+      ctx.font = "bold 64px 'GeistMono', monospace";
+      ctx.textAlign = "center";
+      ctx.shadowColor = "#ff2222";
+      ctx.shadowBlur = 24;
+      ctx.fillText("GAME OVER", CW / 2, CH / 2 - 60);
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "24px 'GeistMono', monospace";
+      ctx.fillText(`SCORE: ${gs.score}`, CW / 2, CH / 2 + 10);
+      ctx.fillText(`BEST:  ${gs.hiScore}`, CW / 2, CH / 2 + 50);
+      if (Math.floor(gs.blinkTick / 30) % 2 === 0) {
+        ctx.fillStyle = "#ffff44";
+        ctx.font = "bold 22px 'GeistMono', monospace";
+        ctx.fillText("PRESS SPACE TO RESTART", CW / 2, CH / 2 + 110);
+      }
+    } else {
+      // PLAYING
+      drawHUD(ctx, gs.score, gs.hiScore, gs.wave, gs.lives, gs.playerX);
+
+      // Wave banner
+      if (gs.waveBannerTick > 0) {
+        const a = Math.min(1, gs.waveBannerTick / 30);
+        ctx.save();
+        ctx.globalAlpha = a;
+        ctx.fillStyle = "#ffff44";
+        ctx.font = "bold 36px 'GeistMono', monospace";
+        ctx.textAlign = "center";
+        ctx.fillText(`WAVE ${gs.wave}`, CW / 2, CH / 2);
+        ctx.restore();
+      }
+
+      // Shields
+      drawShields(ctx, gs.shields);
+
+      // Aliens
+      const frame = gs.alienMarchPhase;
+      for (const alien of gs.aliens) {
+        if (alien.alive) {
+          drawAlien(ctx, alien.x, alien.y, alien.type, frame);
+        }
+      }
+
+      // UFO
+      drawUFO(ctx, gs.ufo);
+
+      // Player
+      if (gs.playerAlive) {
+        // Flicker on respawn (not currently implemented but keeping signature)
+        drawPlayer(ctx, gs.playerX, gs.playerAlive, gs.tick);
+      }
+
+      // Bullets
+      if (gs.bullet.active) drawBullet(ctx, gs.bullet);
+      for (const ab of gs.alienBullets) drawAlienBullet(ctx, ab);
+
+      // Particles & popups
+      drawParticles(ctx, gs.particles);
+      drawPopups(ctx, gs.popups);
+
+      // Ground line
+      ctx.strokeStyle = "#33ff44";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(0, CH - 28);
+      ctx.lineTo(CW, CH - 28);
+      ctx.stroke();
+    }
+
+    rafRef.current = requestAnimationFrame(loop);
+  }, [startGame, nextWave]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext("2d")!;
 
-    // ── Main Loop ──────────────────────────────────────────────────────────
-    const loop = (ts: number) => {
-      const dt = Math.min(ts - lastTRef.current, 50);
-      lastTRef.current = ts;
-      const gs = gsRef.current;
-
-      // ── Background ────────────────────────────────────────────────────
-      ctx.fillStyle = "#070A14";
-      ctx.fillRect(0, 0, CW, CH);
-
-      // Faint grid
-      ctx.strokeStyle = "rgba(26, 33, 54, 0.4)";
-      ctx.lineWidth = 0.5;
-      for (let gx = 0; gx < CW; gx += 40) {
-        ctx.beginPath();
-        ctx.moveTo(gx, 0);
-        ctx.lineTo(gx, CH);
-        ctx.stroke();
+    const onKey = (e: KeyboardEvent, down: boolean) => {
+      if ([" ", "ArrowLeft", "ArrowRight", "a", "d"].includes(e.key)) {
+        e.preventDefault();
       }
-      for (let gy = 0; gy < CH; gy += 40) {
-        ctx.beginPath();
-        ctx.moveTo(0, gy);
-        ctx.lineTo(CW, gy);
-        ctx.stroke();
-      }
-
-      // Stars
-      for (const s of gs.stars) {
-        const op = s.base + Math.sin(ts * s.speed + s.offset) * 0.3;
-        ctx.fillStyle = `rgba(255,255,255,${Math.max(0.05, Math.min(1, op))})`;
-        ctx.beginPath();
-        ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
-        ctx.fill();
-      }
-
-      if (gs.screen === "START") {
-        drawStart(ctx, gs, ts);
-      } else if (gs.screen === "PLAYING") {
-        updateGame(gs, dt, ts);
-        drawGame(ctx, gs, ts);
-      } else if (gs.screen === "GAME_OVER") {
-        drawGame(ctx, gs, ts);
-        drawGameOver(ctx, gs, ts);
-      }
-
-      rafRef.current = requestAnimationFrame(loop);
+      if (down) keysRef.current.add(e.key);
+      else keysRef.current.delete(e.key);
     };
+
+    const onKeyDown = (e: KeyboardEvent) => onKey(e, true);
+    const onKeyUp = (e: KeyboardEvent) => onKey(e, false);
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+
+    // Init audio on first interaction
+    const initAudio = () => {
+      if (!audioRef.current) audioRef.current = createAudio();
+    };
+    window.addEventListener("keydown", initAudio, { once: true });
 
     rafRef.current = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(rafRef.current);
-  }, []);
 
-  // ── Key Handlers ────────────────────────────────────────────────────────
-  useEffect(() => {
-    const onDown = (e: KeyboardEvent) => {
-      keysRef.current.add(e.code);
-      if (e.code === "Space") {
-        e.preventDefault();
-        ensureAudio();
-        const gs = gsRef.current;
-        if (gs.screen === "START") {
-          resetForNewGame(gs);
-          gs.screen = "PLAYING";
-        } else if (gs.screen === "PLAYING" && canShootRef.current) {
-          const active = gs.playerBullets.filter((b) => b.active);
-          if (active.length < 3) {
-            gs.playerBullets.push({
-              x: gs.playerX,
-              y: PLAYER_Y,
-              active: true,
-            });
-            playShoot();
-            canShootRef.current = false;
-            shootCooldownRef.current = 150;
-          }
-        }
-      }
-      if (
-        ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(e.code)
-      ) {
-        e.preventDefault();
-      }
-    };
-    const onUp = (e: KeyboardEvent) => {
-      keysRef.current.delete(e.code);
-      if (e.code === "Space") canShootRef.current = true;
-    };
-    window.addEventListener("keydown", onDown);
-    window.addEventListener("keyup", onUp);
     return () => {
-      window.removeEventListener("keydown", onDown);
-      window.removeEventListener("keyup", onUp);
+      cancelAnimationFrame(rafRef.current);
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
     };
-  }, []);
-
-  // ── Update Logic (inside closure, but called from loop) ──────────────────
-  function updateGame(gs: GameState, dt: number, _ts: number) {
-    // Shoot cooldown
-    if (shootCooldownRef.current > 0) {
-      shootCooldownRef.current -= dt;
-      if (shootCooldownRef.current <= 0) {
-        canShootRef.current = true;
-        shootCooldownRef.current = 0;
-      }
-    }
-
-    // Wave clear countdown
-    if (gs.showWaveClear) {
-      gs.waveClearTimer -= dt;
-      if (gs.waveClearTimer <= 0) {
-        gs.showWaveClear = false;
-        resetWave(gs);
-      }
-      // Still update particles/popups but pause game logic
-      updateParticles(gs, dt);
-      return;
-    }
-
-    // Player movement
-    if (keysRef.current.has("ArrowLeft") || keysRef.current.has("KeyA")) {
-      gs.playerX = Math.max(PLAYER_W / 2 + 10, gs.playerX - PLAYER_SPEED);
-    }
-    if (keysRef.current.has("ArrowRight") || keysRef.current.has("KeyD")) {
-      gs.playerX = Math.min(CW - PLAYER_W / 2 - 10, gs.playerX + PLAYER_SPEED);
-    }
-
-    // Player invincibility
-    if (gs.playerInvincible) {
-      gs.playerInvTimer -= dt;
-      gs.playerFlashTimer += dt;
-      if (gs.playerFlashTimer >= 100) {
-        gs.playerVisible = !gs.playerVisible;
-        gs.playerFlashTimer = 0;
-      }
-      if (gs.playerInvTimer <= 0) {
-        gs.playerInvincible = false;
-        gs.playerVisible = true;
-        gs.playerFlashTimer = 0;
-      }
-    }
-
-    // Alien frame animation
-    gs.alienFrameTimer += dt;
-    if (gs.alienFrameTimer >= 500) {
-      gs.alienFrame = (gs.alienFrame + 1) % 2;
-      gs.alienFrameTimer = 0;
-    }
-
-    // Alien movement
-    const alive = aliveAliens(gs);
-    if (alive.length === 0) {
-      // Wave clear!
-      stopUFOSound();
-      gs.ufo.active = false;
-      gs.showWaveClear = true;
-      gs.waveClearTimer = 2500;
-      return;
-    }
-
-    const speedMultiplier =
-      1 + (1 - alive.length / (ALIEN_COLS * ALIEN_ROWS)) * 3;
-    const effectiveSpeed = gs.alienSpeed * speedMultiplier;
-
-    gs.alienMoveTimer += dt;
-    const moveInterval = Math.max(16, 80 - effectiveSpeed * 8);
-    if (gs.alienMoveTimer >= moveInterval) {
-      gs.alienMoveTimer = 0;
-
-      if (gs.alienDropPending) {
-        gs.alienDropPending = false;
-        for (const a of gs.aliens) {
-          if (a.alive) a.y += 20;
-        }
-        gs.alienDir = gs.alienDir === 1 ? -1 : 1;
-      } else {
-        let hitWall = false;
-        for (const a of gs.aliens) {
-          if (a.alive) {
-            a.x += gs.alienDir * effectiveSpeed;
-            if (a.x <= 10 || a.x >= CW - 10 - ALIEN_W) hitWall = true;
-          }
-        }
-        if (hitWall) gs.alienDropPending = true;
-      }
-    }
-
-    // Check if any alien reached the player
-    for (const a of alive) {
-      if (a.y + ALIEN_H >= PLAYER_Y && !gs.playerInvincible) {
-        hitPlayer(gs);
-        break;
-      }
-    }
-
-    // Alien shooting
-    gs.alienShootTimer += dt;
-    const shootInterval =
-      gs.alienShootInterval *
-      (0.5 + (alive.length / (ALIEN_COLS * ALIEN_ROWS)) * 0.5);
-    if (gs.alienShootTimer >= shootInterval) {
-      gs.alienShootTimer = 0;
-      // Get bottom-most alien in random column
-      const columns: Map<number, Alien> = new Map();
-      for (const a of alive) {
-        const col = Math.round((a.x - ALIEN_START_X) / ALIEN_SX);
-        const existing = columns.get(col);
-        if (!existing || a.y > existing.y) columns.set(col, a);
-      }
-      const shooters = Array.from(columns.values());
-      if (shooters.length > 0) {
-        const shooter = shooters[Math.floor(Math.random() * shooters.length)];
-        gs.alienBullets.push({
-          x: shooter.x + ALIEN_W / 2,
-          y: shooter.y + ALIEN_H,
-          active: true,
-          zigzag: 0,
-        });
-      }
-    }
-
-    // UFO spawning
-    gs.ufoTimer += dt;
-    if (!gs.ufo.active && gs.ufoTimer >= gs.ufoNextSpawn) {
-      gs.ufoTimer = 0;
-      gs.ufoNextSpawn = 15000 + Math.random() * 10000;
-      gs.ufo.active = true;
-      gs.ufo.dir = Math.random() > 0.5 ? 1 : -1;
-      gs.ufo.x = gs.ufo.dir === 1 ? -40 : CW + 40;
-      gs.ufo.speed = 1.5 + Math.random() * 1.5;
-      const ptOptions = [50, 100, 150, 200, 300];
-      gs.ufo.pts = ptOptions[Math.floor(Math.random() * ptOptions.length)];
-      startUFOSound();
-    }
-
-    if (gs.ufo.active) {
-      gs.ufo.x += gs.ufo.dir * gs.ufo.speed;
-      if (gs.ufo.x > CW + 60 || gs.ufo.x < -60) {
-        gs.ufo.active = false;
-        stopUFOSound();
-      }
-    }
-
-    // Update player bullets
-    for (const b of gs.playerBullets) {
-      if (!b.active) continue;
-      b.y -= BULLET_SPEED;
-      if (b.y < HUD_H) {
-        b.active = false;
-        continue;
-      }
-
-      // vs aliens
-      let hit = false;
-      for (const a of gs.aliens) {
-        if (!a.alive) continue;
-        if (
-          b.x >= a.x &&
-          b.x <= a.x + ALIEN_W &&
-          b.y >= a.y &&
-          b.y <= a.y + ALIEN_H
-        ) {
-          a.alive = false;
-          b.active = false;
-          const pts = getAlienPoints(a.type);
-          gs.score += pts;
-          if (gs.score > gs.hiScore) {
-            gs.hiScore = gs.score;
-            localStorage.setItem("spaceInvaders_highScore", String(gs.hiScore));
-          }
-          addExplosion(
-            gs,
-            a.x + ALIEN_W / 2,
-            a.y + ALIEN_H / 2,
-            a.type === 2 ? "#FF4FD1" : a.type === 1 ? "#38FF6F" : "#40F3FF",
-          );
-          addPopup(gs, a.x + ALIEN_W / 2, a.y, `+${pts}`);
-          playAlienDeath();
-          hit = true;
-          break;
-        }
-      }
-      if (hit) continue;
-
-      // vs UFO
-      if (
-        gs.ufo.active &&
-        Math.abs(b.x - gs.ufo.x) < 32 &&
-        Math.abs(b.y - gs.ufo.y) < 14
-      ) {
-        gs.ufo.active = false;
-        stopUFOSound();
-        b.active = false;
-        gs.score += gs.ufo.pts;
-        if (gs.score > gs.hiScore) {
-          gs.hiScore = gs.score;
-          localStorage.setItem("spaceInvaders_highScore", String(gs.hiScore));
-        }
-        addExplosion(gs, gs.ufo.x, gs.ufo.y, "#FF4A4A", 12);
-        addPopup(gs, gs.ufo.x, gs.ufo.y - 20, `+${gs.ufo.pts}`);
-        playUFODeath();
-        continue;
-      }
-
-      // vs shields
-      for (const shield of gs.shields) {
-        if (
-          b.x >= shield.x &&
-          b.x <= shield.x + SHIELD_COLS_N * SHIELD_PX &&
-          b.y >= shield.y &&
-          b.y <= shield.y + SHIELD_ROWS_N * SHIELD_PX
-        ) {
-          if (shieldHit(shield, b.x, b.y)) {
-            b.active = false;
-            break;
-          }
-        }
-      }
-    }
-    gs.playerBullets = gs.playerBullets.filter((b) => b.active);
-
-    // Update alien bullets
-    for (const b of gs.alienBullets) {
-      if (!b.active) continue;
-      b.y += ALIEN_BULLET_SPEED;
-      b.zigzag += 0.2;
-      if (b.y > CH) {
-        b.active = false;
-        continue;
-      }
-
-      // vs player
-      if (
-        !gs.playerInvincible &&
-        gs.playerVisible &&
-        Math.abs(b.x - gs.playerX) < PLAYER_W / 2 + 2 &&
-        b.y >= PLAYER_Y &&
-        b.y <= PLAYER_Y + 24
-      ) {
-        b.active = false;
-        hitPlayer(gs);
-        continue;
-      }
-
-      // vs shields
-      for (const shield of gs.shields) {
-        if (
-          b.x >= shield.x &&
-          b.x <= shield.x + SHIELD_COLS_N * SHIELD_PX &&
-          b.y >= shield.y &&
-          b.y <= shield.y + SHIELD_ROWS_N * SHIELD_PX
-        ) {
-          if (shieldHit(shield, b.x, b.y)) {
-            b.active = false;
-            break;
-          }
-        }
-      }
-    }
-    gs.alienBullets = gs.alienBullets.filter((b) => b.active);
-
-    updateParticles(gs, dt);
-  }
-
-  function hitPlayer(gs: GameState) {
-    gs.lives--;
-    addExplosion(gs, gs.playerX, PLAYER_Y + 10, "#40F3FF", 12);
-    playPlayerDeath();
-    if (gs.lives <= 0) {
-      gs.screen = "GAME_OVER";
-      stopUFOSound();
-      playGameOver();
-    } else {
-      gs.playerInvincible = true;
-      gs.playerInvTimer = 2000;
-      gs.playerFlashTimer = 0;
-    }
-  }
-
-  function updateParticles(gs: GameState, dt: number) {
-    for (const p of gs.particles) {
-      p.x += p.vx;
-      p.y += p.vy;
-      p.vy += 0.05;
-      p.life -= dt * 0.05;
-    }
-    gs.particles = gs.particles.filter((p) => p.life > 0);
-
-    for (const pop of gs.popups) {
-      pop.y -= 0.5;
-      pop.life -= dt * 0.05;
-    }
-    gs.popups = gs.popups.filter((p) => p.life > 0);
-  }
-
-  // ── Draw Game ──────────────────────────────────────────────────────────
-  function drawGame(ctx: CanvasRenderingContext2D, gs: GameState, ts: number) {
-    // Shields
-    for (const shield of gs.shields) {
-      drawShield(ctx, shield);
-    }
-
-    // Aliens
-    for (const a of gs.aliens) {
-      if (a.alive) drawAlien(ctx, a, gs.alienFrame);
-    }
-
-    // UFO
-    if (gs.ufo.active) drawUFO(ctx, gs.ufo);
-
-    // Player bullets
-    for (const b of gs.playerBullets) {
-      if (!b.active) continue;
-      ctx.fillStyle = "#36FF7A";
-      ctx.shadowColor = "#36FF7A";
-      ctx.shadowBlur = 8;
-      ctx.fillRect(b.x - 2, b.y - 10, 4, 12);
-      ctx.shadowBlur = 0;
-    }
-
-    // Alien bullets (zigzag)
-    for (const b of gs.alienBullets) {
-      if (!b.active) continue;
-      const zx = Math.sin(b.zigzag) * 4;
-      ctx.fillStyle = "#FF4A4A";
-      ctx.shadowColor = "#FF4A4A";
-      ctx.shadowBlur = 6;
-      ctx.fillRect(b.x + zx - 2, b.y - 6, 4, 10);
-      ctx.shadowBlur = 0;
-    }
-
-    // Player
-    if (gs.playerVisible) {
-      drawPlayer(ctx, gs.playerX);
-    }
-
-    // Ground line
-    ctx.strokeStyle = "#36FF7A";
-    ctx.shadowColor = "#36FF7A";
-    ctx.shadowBlur = 4;
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(0, PLAYER_Y + 26);
-    ctx.lineTo(CW, PLAYER_Y + 26);
-    ctx.stroke();
-    ctx.shadowBlur = 0;
-
-    // Particles
-    for (const p of gs.particles) {
-      const a = Math.max(0, p.life / p.maxLife);
-      ctx.globalAlpha = a;
-      ctx.fillStyle = p.color;
-      ctx.shadowColor = p.color;
-      ctx.shadowBlur = 4;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.shadowBlur = 0;
-    }
-    ctx.globalAlpha = 1;
-
-    // Score popups
-    for (const pop of gs.popups) {
-      const a = Math.max(0, pop.life / pop.maxLife);
-      ctx.globalAlpha = a;
-      ctx.font = '8px "Press Start 2P", monospace';
-      ctx.fillStyle = "#FFE95A";
-      ctx.shadowColor = "#FFE95A";
-      ctx.shadowBlur = 6;
-      ctx.textBaseline = "middle";
-      ctx.fillText(
-        pop.text,
-        pop.x - ctx.measureText(pop.text).width / 2,
-        pop.y,
-      );
-      ctx.shadowBlur = 0;
-    }
-    ctx.globalAlpha = 1;
-
-    // Wave clear overlay
-    if (gs.showWaveClear) {
-      const blink = Math.floor(ts / 200) % 2 === 0;
-      if (blink) {
-        ctx.fillStyle = "rgba(7,10,20,0.6)";
-        ctx.fillRect(0, HUD_H, CW, CH - HUD_H);
-        ctx.font = '24px "Press Start 2P", monospace';
-        ctx.fillStyle = "#36FF7A";
-        ctx.shadowColor = "#A6FFD0";
-        ctx.shadowBlur = 20;
-        ctx.textBaseline = "middle";
-        const txt = "WAVE CLEAR!";
-        ctx.fillText(txt, CW / 2 - ctx.measureText(txt).width / 2, CH / 2);
-        ctx.shadowBlur = 0;
-      }
-    }
-
-    drawHUD(ctx, gs.score, gs.hiScore, gs.lives, gs.wave);
-  }
-
-  // ── Start Screen ───────────────────────────────────────────────────────
-  function drawStart(ctx: CanvasRenderingContext2D, gs: GameState, ts: number) {
-    // Title
-    ctx.font = '28px "Press Start 2P", monospace';
-    ctx.textBaseline = "middle";
-    ctx.fillStyle = "#36FF7A";
-    ctx.shadowColor = "#A6FFD0";
-    ctx.shadowBlur = 24;
-    const title = "SPACE INVADERS";
-    ctx.fillText(title, CW / 2 - ctx.measureText(title).width / 2, 130);
-    ctx.shadowBlur = 0;
-
-    // Animated demo aliens marching
-    const marchOffset = Math.sin(ts * 0.0015) * 60;
-    const demoTypes: Array<0 | 1 | 2> = [2, 1, 0];
-    for (let row = 0; row < 3; row++) {
-      for (let col = 0; col < 8; col++) {
-        const dAlien: Alien = {
-          x: 80 + col * 75 + marchOffset,
-          y: 200 + row * 55,
-          alive: true,
-          type: demoTypes[row],
-        };
-        drawAlien(ctx, dAlien, gs.alienFrame);
-      }
-    }
-
-    // Score table
-    ctx.font = '8px "Press Start 2P", monospace';
-    const table: Array<{ type: 0 | 1 | 2; pts: string }> = [
-      { type: 0, pts: "= 40 PTS" },
-      { type: 1, pts: "= 20 PTS" },
-      { type: 2, pts: "= 10 PTS" },
-    ];
-    for (let i = 0; i < table.length; i++) {
-      const { type, pts } = table[i];
-      const ty = 400 + i * 38;
-      drawAlien(ctx, { x: CW / 2 - 130, y: ty, alive: true, type }, 0);
-      ctx.fillStyle = "#E8EAF2";
-      ctx.shadowBlur = 0;
-      ctx.fillText(pts, CW / 2 - 85, ty + 12);
-    }
-
-    // UFO mystery
-    drawUFO(ctx, {
-      x: CW / 2 + 80,
-      y: 412,
-      active: true,
-      dir: 1,
-      pts: 0,
-      speed: 0,
-    });
-    ctx.fillStyle = "#E8EAF2";
-    ctx.shadowBlur = 0;
-    ctx.font = '8px "Press Start 2P", monospace';
-    ctx.fillText("= ??? PTS", CW / 2 - 85 + 165, 424);
-
-    // Controls
-    ctx.fillStyle = "#A8ADBE";
-    ctx.font = '8px "Press Start 2P", monospace';
-    const c1 = "\u2190 \u2192  MOVE     SPACE  SHOOT";
-    ctx.fillText(c1, CW / 2 - ctx.measureText(c1).width / 2, 550);
-
-    // Hi-score
-    ctx.fillStyle = "#FFE95A";
-    ctx.shadowColor = "#FFE95A";
-    ctx.shadowBlur = 6;
-    ctx.font = '8px "Press Start 2P", monospace';
-    const hs = `HI-SCORE: ${gs.hiScore.toString().padStart(5, "0")}`;
-    ctx.fillText(hs, CW / 2 - ctx.measureText(hs).width / 2, 590);
-    ctx.shadowBlur = 0;
-
-    // Blink press space
-    if (Math.floor(ts / 500) % 2 === 0) {
-      ctx.font = '11px "Press Start 2P", monospace';
-      ctx.fillStyle = "#36FF7A";
-      ctx.shadowColor = "#36FF7A";
-      ctx.shadowBlur = 12;
-      const ps = "PRESS SPACE TO START";
-      ctx.fillText(ps, CW / 2 - ctx.measureText(ps).width / 2, 638);
-      ctx.shadowBlur = 0;
-    }
-
-    // Footer
-    ctx.font = '7px "Press Start 2P", monospace';
-    ctx.fillStyle = "rgba(168,173,190,0.5)";
-    ctx.shadowBlur = 0;
-    const footer = `\u00A9 ${new Date().getFullYear()}. Built with love using caffeine.ai`;
-    ctx.fillText(footer, CW / 2 - ctx.measureText(footer).width / 2, CH - 10);
-  }
-
-  // ── Game Over Screen ───────────────────────────────────────────────────
-  function drawGameOver(
-    ctx: CanvasRenderingContext2D,
-    gs: GameState,
-    ts: number,
-  ) {
-    // Dark overlay
-    ctx.fillStyle = "rgba(5,6,19,0.82)";
-    ctx.fillRect(0, HUD_H, CW, CH - HUD_H);
-
-    // Panel
-    ctx.fillStyle = "rgba(10,11,26,0.95)";
-    ctx.strokeStyle = "#FF4FD1";
-    ctx.lineWidth = 2;
-    const panelX = CW / 2 - 240;
-    const panelY = CH / 2 - 160;
-    ctx.fillRect(panelX, panelY, 480, 320);
-    ctx.strokeRect(panelX, panelY, 480, 320);
-    ctx.shadowColor = "#FF4FD1";
-    ctx.shadowBlur = 12;
-    ctx.strokeRect(panelX, panelY, 480, 320);
-    ctx.shadowBlur = 0;
-
-    // GAME OVER
-    ctx.font = '30px "Press Start 2P", monospace';
-    ctx.fillStyle = "#FF4FD1";
-    ctx.shadowColor = "#FF9BE8";
-    ctx.shadowBlur = 22;
-    ctx.textBaseline = "middle";
-    const go = "GAME OVER";
-    ctx.fillText(go, CW / 2 - ctx.measureText(go).width / 2, panelY + 60);
-    ctx.shadowBlur = 0;
-
-    // Score
-    ctx.font = '13px "Press Start 2P", monospace';
-    ctx.fillStyle = "#E8EAF2";
-    const scTxt = `SCORE: ${gs.score.toString().padStart(5, "0")}`;
-    ctx.fillText(
-      scTxt,
-      CW / 2 - ctx.measureText(scTxt).width / 2,
-      panelY + 120,
-    );
-
-    // Hi-score
-    ctx.fillStyle = "#FFE95A";
-    ctx.shadowColor = "#FFE95A";
-    ctx.shadowBlur = 8;
-    const hiTxt = `HI-SCORE: ${gs.hiScore.toString().padStart(5, "0")}`;
-    ctx.fillText(
-      hiTxt,
-      CW / 2 - ctx.measureText(hiTxt).width / 2,
-      panelY + 155,
-    );
-    ctx.shadowBlur = 0;
-
-    // Wave reached
-    ctx.fillStyle = "#A8ADBE";
-    ctx.font = '9px "Press Start 2P", monospace';
-    const waveTxt = `WAVE ${gs.wave} REACHED`;
-    ctx.fillText(
-      waveTxt,
-      CW / 2 - ctx.measureText(waveTxt).width / 2,
-      panelY + 190,
-    );
-
-    // INSERT COIN blink
-    if (Math.floor(ts / 600) % 2 === 0) {
-      ctx.font = '10px "Press Start 2P", monospace';
-      ctx.fillStyle = "#A8ADBE";
-      const ic = "INSERT COIN";
-      ctx.fillText(ic, CW / 2 - ctx.measureText(ic).width / 2, panelY + 228);
-    }
-
-    // Restart button
-    const btnW = 220;
-    const btnH = 40;
-    const btnX = CW / 2 - btnW / 2;
-    const btnY = panelY + 255;
-    ctx.fillStyle = "#36FF7A";
-    ctx.shadowColor = "#36FF7A";
-    ctx.shadowBlur = 14;
-    ctx.fillRect(btnX, btnY, btnW, btnH);
-    ctx.shadowBlur = 0;
-    ctx.font = '10px "Press Start 2P", monospace';
-    ctx.fillStyle = "#070A14";
-    const rb = "RESTART";
-    ctx.fillText(rb, CW / 2 - ctx.measureText(rb).width / 2, btnY + btnH / 2);
-  }
-
-  // Canvas click handler for restart
-  const handleCanvasClick = useCallback(
-    (e: React.MouseEvent<HTMLCanvasElement>) => {
-      const gs = gsRef.current;
-      if (gs.screen !== "GAME_OVER") return;
-      const rect = (e.target as HTMLCanvasElement).getBoundingClientRect();
-      const scaleX = CW / rect.width;
-      const scaleY = CH / rect.height;
-      const cx = (e.clientX - rect.left) * scaleX;
-      const cy = (e.clientY - rect.top) * scaleY;
-      const panelY = CH / 2 - 160;
-      const btnW = 220;
-      const btnH = 40;
-      const btnX = CW / 2 - btnW / 2;
-      const btnY = panelY + 255;
-      if (cx >= btnX && cx <= btnX + btnW && cy >= btnY && cy <= btnY + btnH) {
-        ensureAudio();
-        handleRestart();
-      }
-    },
-    [handleRestart],
-  );
-
-  // Also handle Space on game over
-  useEffect(() => {
-    const onSpace = (e: KeyboardEvent) => {
-      if (e.code === "Space" && gsRef.current.screen === "GAME_OVER") {
-        e.preventDefault();
-        ensureAudio();
-        handleRestart();
-      }
-    };
-    window.addEventListener("keydown", onSpace);
-    return () => window.removeEventListener("keydown", onSpace);
-  }, [handleRestart]);
+  }, [loop]);
 
   return (
-    <div
+    <canvas
+      ref={canvasRef}
+      width={CW}
+      height={CH}
       style={{
-        width: "100vw",
-        height: "100vh",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        backgroundColor: "#050613",
-        overflow: "hidden",
+        display: "block",
+        imageRendering: "pixelated",
+        border: "2px solid #33ff44",
+        boxShadow: "0 0 30px #33ff4460",
       }}
-    >
-      <canvas
-        ref={canvasRef}
-        width={CW}
-        height={CH}
-        onClick={handleCanvasClick}
-        onKeyDown={
-          handleCanvasClick as unknown as React.KeyboardEventHandler<HTMLCanvasElement>
-        }
-        data-ocid="game.canvas_target"
-        style={{
-          display: "block",
-          maxWidth: "100vw",
-          maxHeight: "100vh",
-          objectFit: "contain",
-          cursor: gsRef.current.screen === "GAME_OVER" ? "pointer" : "default",
-          imageRendering: "pixelated",
-        }}
-      />
-    </div>
+    />
   );
 }
