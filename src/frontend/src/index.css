@@ -1,4 +1,4 @@
-@import url("https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Oswald:wght@400;600;700&display=swap");
 
 @tailwind base;
 @tailwind components;
@@ -7,40 +7,38 @@
 @layer base {
   :root {
     --radius: 0.5rem;
-    /* Navy background */
-    --background: 0.14 0.04 240;
-    --foreground: 0.96 0.005 240;
-    --card: 0.18 0.05 240;
-    --card-foreground: 0.96 0.005 240;
-    --popover: 0.18 0.05 240;
-    --popover-foreground: 0.96 0.005 240;
-    /* Orange-gold primary */
-    --primary: 0.72 0.16 55;
-    --primary-foreground: 0.1 0.02 240;
-    --secondary: 0.22 0.055 240;
-    --secondary-foreground: 0.9 0.01 240;
-    --muted: 0.2 0.04 240;
-    --muted-foreground: 0.6 0.04 240;
-    --accent: 0.72 0.16 55;
-    --accent-foreground: 0.1 0.02 240;
+    --background: 0.13 0.04 145;
+    --foreground: 0.97 0.005 145;
+    --card: 0.17 0.05 145;
+    --card-foreground: 0.97 0.005 145;
+    --popover: 0.17 0.05 145;
+    --popover-foreground: 0.97 0.005 145;
+    --primary: 0.85 0.22 130;
+    --primary-foreground: 0.1 0.03 145;
+    --secondary: 0.22 0.06 145;
+    --secondary-foreground: 0.9 0.01 145;
+    --muted: 0.2 0.04 145;
+    --muted-foreground: 0.6 0.04 145;
+    --accent: 0.78 0.19 85;
+    --accent-foreground: 0.1 0.02 145;
     --destructive: 0.58 0.24 25;
     --destructive-foreground: 0.985 0 0;
-    --border: 0.28 0.06 240;
-    --input: 0.28 0.06 240;
-    --ring: 0.72 0.16 55;
-    --chart-1: 0.72 0.16 55;
-    --chart-2: 0.65 0.2 150;
+    --border: 0.28 0.06 145;
+    --input: 0.28 0.06 145;
+    --ring: 0.85 0.22 130;
+    --chart-1: 0.85 0.22 130;
+    --chart-2: 0.78 0.19 85;
     --chart-3: 0.7 0.18 200;
-    --chart-4: 0.8 0.18 85;
+    --chart-4: 0.8 0.18 55;
     --chart-5: 0.6 0.22 320;
-    --sidebar: 0.12 0.04 240;
-    --sidebar-foreground: 0.96 0.005 240;
-    --sidebar-primary: 0.72 0.16 55;
-    --sidebar-primary-foreground: 0.1 0.02 240;
-    --sidebar-accent: 0.22 0.055 240;
-    --sidebar-accent-foreground: 0.9 0.01 240;
-    --sidebar-border: 0.28 0.06 240;
-    --sidebar-ring: 0.72 0.16 55;
+    --sidebar: 0.12 0.04 145;
+    --sidebar-foreground: 0.97 0.005 145;
+    --sidebar-primary: 0.85 0.22 130;
+    --sidebar-primary-foreground: 0.1 0.03 145;
+    --sidebar-accent: 0.22 0.06 145;
+    --sidebar-accent-foreground: 0.9 0.01 145;
+    --sidebar-border: 0.28 0.06 145;
+    --sidebar-ring: 0.85 0.22 130;
   }
 
   * {
@@ -49,7 +47,11 @@
 
   body {
     @apply bg-background text-foreground;
-    background: linear-gradient(180deg, #0b1a2a 0%, #142b45 100%);
+    background: linear-gradient(
+      180deg,
+      oklch(0.12 0.04 145) 0%,
+      oklch(0.08 0.03 145) 100%
+    );
     background-attachment: fixed;
     overflow-x: hidden;
   }

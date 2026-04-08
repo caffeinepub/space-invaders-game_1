@@ -1,4 +1,4 @@
-import SpaceInvaders from "./SpaceInvaders";
+import RonaldoGame from "./RonaldoGame";
 
 export default function App() {
   return (
@@ -6,14 +6,15 @@ export default function App() {
       style={{
         margin: 0,
         padding: 0,
-        background: "#000",
+        background: "linear-gradient(180deg, #071a07 0%, #030e03 100%)",
         minHeight: "100vh",
         display: "flex",
+        flexDirection: "column",
         alignItems: "center",
         justifyContent: "center",
       }}
     >
-      <SpaceInvaders />
+      <RonaldoGame />
     </div>
   );
 }
